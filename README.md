@@ -1,6 +1,6 @@
 # Data and code corresponding to the analysis of:
 
-_Douadi et al. (2024) TITLE_
+_Douadi et al. (2024) Differential translocation of bacteriophages across the intestinal barrier in health and Crohn’s disease_
 
 available on BioRXiv: link
 
