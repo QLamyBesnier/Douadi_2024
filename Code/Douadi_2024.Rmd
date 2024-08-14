@@ -1,0 +1,253 @@
+---
+title: "Differential translocation of bacteriophages across the intestinal barrier in health and Crohn’s disease"
+author: "Quentin Lamy-Besnier"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_caption: yes
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Analysis of Douadi et al. 2024: Differential translocation of bacteriophages across the intestinal barrier in health and Crohn’s disease. 
+
+See https://github.com/QLamyBesnier/Douadi_2024 for more information.
+
+```{r Packages, message=FALSE, warning=FALSE}
+library(phyloseq) # for phyloseq
+library(ggplot2) # for ggplot2 graphs
+library(tibble) # for "column_to_rownames"
+library(ggpubr) # for stats on ggplots
+library(DT) # for interactive datatables
+library(ggvenn) # for venn diagrams
+library(scales) # for log transformations
+library(vegan) # for the ecological analysis
+library(rstatix) # for the kruskal-wallis test
+library(reshape2) # for melting data frames
+library(pheatmap) # for heatmaps
+library(UpSetR) # for upset graphs
+library(gtools) # for smart sorting
+library(Maaslin2) # for differential analysis
+```
+
+Distribution of host phyla for vOTUs shared between stool and blood samples. This recreates Figure 5C:
+
+```{r Fig5C, message=FALSE, warning=FALSE}
+# loading data
+abundance_mat = read.table("Douadi_abundances.csv", header = TRUE, sep = "\t")
+tax_mat = read.table("Douadi_tax.csv", header = TRUE, sep = ",")
+sample_mat = read.csv("Douadi_metadata.csv", header = TRUE, sep = ";")
+
+# preparing data for phyloseq integration
+abundance_mat <- column_to_rownames(abundance_mat, "X")
+tax_mat <- column_to_rownames(tax_mat, "X")
+sample_mat <- column_to_rownames(sample_mat, "X")
+abundance_mat <- as.matrix(abundance_mat)
+tax_mat <- as.matrix(tax_mat)
+abundance = otu_table(abundance_mat, taxa_are_rows = TRUE)
+contig_info = tax_table(tax_mat)
+sample_info = sample_data(sample_mat)
+
+# creation of the phyloseq object
+ab_all <- phyloseq(abundance,contig_info,sample_info)
+
+# remove samples for which there are not enough reads
+keep <- rownames(sample_data(ab_all))[!rownames(sample_data(ab_all)) %in% c("CD7_B", "H13_B", "H7_F", "H10_F")]
+ab <- prune_samples(keep, ab_all)
+
+# only keep viral, non-contaminant vOTUs
+no_contam <- subset_taxa(ab, Contaminant == "No")
+no_contam <- transform_sample_counts(no_contam, function(x) x / sum(x))
+viral <- subset_taxa(no_contam, Viral == "Yes")
+viral <- transform_sample_counts(viral, function(x) x / sum(x))
+
+# remove vOTUs in samples for which the other sample type has been removed because it did not have enough reads
+keep_shared <- rownames(sample_data(viral))[!rownames(sample_data(viral)) %in% c("CD7_F", "H13_F", "H7_B", "H10_B")]
+viral_shared <- prune_samples(keep_shared, viral)
+
+# vOTUs present in each sample type per individual, then shared vOTUs between both sample types for the same individual
+present_contigs_feces <- list()
+for (sample in sample_names(viral_shared)[grep("_F", sample_names(viral_shared))]) {
+  otu_abundance <- otu_table(viral_shared)[, sample]
+  present_contigs_feces[[gsub("_F$", "", sample)]] <- rownames(otu_abundance[otu_abundance > 0])
+}
+present_contigs_blood <- list()
+for (sample in sample_names(viral_shared)[grep("_B", sample_names(viral_shared))]) {
+  otu_abundance <- otu_table(viral_shared)[, sample]
+  present_contigs_blood[[gsub("_B$", "", sample)]] <- rownames(otu_abundance[otu_abundance > 0])
+}
+shared_contigs <- list()
+for (individual in names(present_contigs_blood)) {
+  intersection <- intersect(present_contigs_feces[[individual]], present_contigs_blood[[individual]])
+  shared_contigs[[individual]] <- intersection
+}
+
+# host information for shared vOTUs
+shared_only_phyla <- data.frame(tax_table(ab)[unique(unlist(shared_contigs)), 18:23][, "HostPhylum"])
+shared_only_phyla$HostPhylum[is.na(shared_only_phyla$HostPhylum)] <- "Unknown"
+shared_only_df <- data.frame(table(shared_only_phyla))
+shared_only_df$HostPhylum <- factor(shared_only_df$HostPhylum, levels = c("Bacteroidota", "Bacillota", "Pseudomonadota", "Unknown"))
+
+# pie chart
+ggplot(shared_only_df, aes(x = "", y = Freq, fill = HostPhylum)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) + 
+  geom_text(aes(label = Freq), position = position_stack(vjust = 0.5), size = 10) +
+  scale_fill_manual(values = c("#F8766D", "#00BA38", "#00BFC4", "grey")) +
+  theme_void() +
+  theme(text = element_text(size = 25))
+```
+
+Venn diagram of the vOTUs identified in blood and stool samples from all individuals. This recreates Figure S8:
+
+```{r FigS8, message=FALSE, warning=FALSE}
+# vOTUs names in each sample type
+feces_contigs <- c()
+for (i in 1:nrow(viral@otu_table@.Data)){
+  if (sum(viral@otu_table@.Data[i,28:54]) > 0){
+    feces_contigs <- append(feces_contigs, rownames(viral@otu_table@.Data)[i])
+  }
+}
+blood_contigs <- c()
+for (i in 1:nrow(viral@otu_table@.Data)){
+  if (sum(viral@otu_table@.Data[i,1:27]) > 0){
+    blood_contigs <- append(blood_contigs, rownames(viral@otu_table@.Data)[i])
+  }
+}
+
+blood_feces_contigs <- list(Blood = blood_contigs, Feces = feces_contigs)
+
+# venn diagram
+ggvenn(blood_feces_contigs, fill_color = c("indianred", "cornflowerblue"), text_size = 10)
+```
+
+Percentage of shared unique vOTUs between stool and blood from the same individual. This recreates Figure 5B:
+
+```{r Fig5B, message=FALSE, warning=FALSE}
+# dataframe of shared unique vOTUs between stool and blood from the individual
+shared_df <- data.frame(Feces = as.numeric(lengths(present_contigs_feces)), Blood = as.numeric(lengths(present_contigs_blood)), Shared = as.numeric(lengths(shared_contigs)), PercentFeces = (as.numeric(lengths(shared_contigs))/as.numeric(lengths(present_contigs_feces)))*100, PercentBlood = (as.numeric(lengths(shared_contigs))/as.numeric(lengths(present_contigs_blood)))*100, Status = c(rep("CD", 9), rep("Healthy", 11), rep("CD", 5)), row.names = names(present_contigs_feces))
+shared_df$Status <- factor(shared_df$Status, levels = c("Healthy", "CD"))
+
+# boxplot
+ggplot(shared_df, aes(x = Status, y = PercentBlood, color = Status)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkgreen", "darkorange")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(method = "wilcox.test", comparisons = list(c("CD", "Healthy")), label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Shared vOTUs between blood and stool from the same individual\n(% blood contigs)", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) + 
+  guides(color = "none")
+```
+
+Venn diagram of Microviridae vOTUs identified in both blood and stool samples. This recreates Figure 5D:
+
+```{r Fig5D, message=FALSE, warning=FALSE}
+# restricting to Microviridae family
+micro <- subset_taxa(no_contam, Family == "Microviridae")
+
+# preparing dataframe for ploting
+df_micro <- as.data.frame(sample_sums(micro)); colnames(df_micro) = c("Microviridae")
+df_micro$Sample = c(rep("Plasma", 27), rep("Stool", 27))
+df_micro$Disease = as.data.frame(ab@sam_data)[,"Disease"]$Disease
+
+# vOTUs names for each sample type
+micro_feces <- subset_samples(micro, SampleType == "Stool")
+micro_feces_contigs <- c()
+for (i in 1:nrow(micro_feces@otu_table@.Data)){
+  if (sum(micro_feces@otu_table@.Data[i,1:27]) > 0){
+    micro_feces_contigs <- append(micro_feces_contigs, rownames(micro_feces@otu_table@.Data)[i])
+  }
+}
+micro_blood <- subset_samples(micro, SampleType == "Plasma")
+micro_blood_contigs <- c()
+for (i in 1:nrow(micro_blood@otu_table@.Data)){
+  if (sum(micro_blood@otu_table@.Data[i,1:27]) > 0){
+    micro_blood_contigs <- append(micro_blood_contigs, rownames(micro_blood@otu_table@.Data)[i])
+  }
+}
+micro_bf_contigs <- list(Blood = micro_blood_contigs, Feces = micro_feces_contigs)
+
+# venn diagram
+ggvenn(micro_bf_contigs, fill_color = c("indianred", "cornflowerblue"), text_size = 12, show_percentage = FALSE)
+```
+
+Distribution of host phyla for the shared Microviridae vOTUs between stool and blood samples. This recreates Figure 5E:
+
+```{r Fig5E, message=FALSE, warning=FALSE}
+# host phylum for shared microviridae vOTUs
+otu_mbc <- subset(otu_table(micro_blood), rownames(otu_table(micro_blood)) %in% micro_blood_contigs)
+phy_mbc <- merge_phyloseq(otu_mbc, tax_table(micro_blood), sample_data(micro_blood))
+mbc_df <- as.data.frame(table(tax_table(phy_mbc)[, "HostPhylum"])); colnames(mbc_df)[1] <- "HostPhylum"
+mbc_df <- rbind(mbc_df, data.frame(HostPhylum = "Unknown", Freq = sum(is.na(tax_table(phy_mbc)[, "HostPhylum"]))))
+mbc_df$HostPhylum <- factor(mbc_df$HostPhylum, levels = c("Bacteroidota", "Bacillota", "Pseudomonadota", "Unknown"))
+
+# pie chart
+ggplot(mbc_df, aes(x = "", y = Freq, fill = HostPhylum)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) + 
+  geom_text(aes(label = Freq), position = position_stack(vjust = 0.5), size = 10) +
+  scale_fill_manual(values = c("#F8766D", "#00BA38", "#00BFC4", "grey")) +
+  theme_void() +
+  theme(text = element_text(size = 25))
+```
+
+Alpha diversity (Shannon index) of Microviridae in stool samples. This recreates Figure S9A:
+
+```{r FigS9A, message=FALSE, warning=FALSE}
+# restricting to fecal samples
+feces_micro <- subset(df_micro, Sample == "Stool")
+feces_micro[feces_micro$Disease == "Crohn",]$Disease <- "CD"
+micro_feces_phyl <- subset_samples(micro, SampleType == "Stool")
+
+# calculation of the shannon index for each fecal sample
+shannon_micro_feces <- estimate_richness(micro_feces_phyl, measures = "Shannon")
+shannon_micro_feces$Disease <- sample_data(micro_feces_phyl)$Disease
+shannon_micro_feces$Disease <- ifelse(shannon_micro_feces$Disease == "Crohn", "CD", shannon_micro_feces$Disease)
+
+# boxplot
+ggplot(shannon_micro_feces, aes(x = Disease, y = Shannon, colour = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  stat_compare_means(comparisons = list(c("CD", "Healthy")), method = "wilcox.test", label = "p.format", size = 7, vjust = -0.2) +
+  labs(x = "", y = "Shannon index", title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+Relative abundance of Microviridae vOTUs in stool samples. This recreates Figure S9B:
+
+```{r FigS9B, message=FALSE, warning=FALSE}
+# boxplot
+ggplot(feces_micro, aes(x = Disease, y = Microviridae, color = Disease)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, height = 0, size = 2.5) +
+  scale_color_manual(values = c("darkorange", "darkgreen")) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  labs(x = "", y = "Microviridae vOTUs (relative abundance)", title = "") +
+  stat_compare_means(method = "wilcox.test", comparisons = list(c("CD", "Healthy")), label = "p.format", size = 7, vjust = -0.2) +
+  theme_classic() +
+  theme(text = element_text(size = 20), axis.text = element_text(color = "black")) +
+  guides(color = "none")
+```
+
+
+
