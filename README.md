@@ -2,7 +2,7 @@
 
 _Douadi et al. (2024) Differential translocation of bacteriophages across the intestinal barrier in health and Crohn’s disease_
 
-available on BioRXiv: link
+available on BioRXiv: [link](https://www.biorxiv.org/content/10.1101/2024.09.17.613249v1)
 
 ### Data
 
